@@ -3,7 +3,7 @@ module tickets
 go 1.21
 
 require (
-	github.com/ThreeDotsLabs/go-event-driven v0.0.10
+	github.com/ThreeDotsLabs/go-event-driven v0.0.12
 	github.com/labstack/echo/v4 v4.10.2
 	github.com/sirupsen/logrus v1.9.0
 )
