@@ -11,15 +11,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	issueReceiptTopic    = "issue-receipt"
-	appendToTrackerTopic = "append-to-tracker"
-)
-
-type TicketsConfirmationRequest struct {
-	Tickets []string `json:"tickets"`
-}
-
 func main() {
 	logger := log.NewWatermill(logrus.NewEntry(logrus.StandardLogger()))
 

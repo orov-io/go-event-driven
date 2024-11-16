@@ -6,12 +6,27 @@ import (
 
 	commonHTTP "github.com/ThreeDotsLabs/go-event-driven/common/http"
 	"github.com/ThreeDotsLabs/watermill"
-	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
+
+type TicketsStatusRequest struct {
+	Tickets []Ticket `json:"tickets"`
+}
+
+type Ticket struct {
+	ID            string `json:"ticket_id"`
+	Status        string `json:"status"`
+	CustomerEmail string `json:"customer_email"`
+	Price         Money  `json:"price"`
+}
+
+type Money struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
+}
 
 type HTTPRouterRunner struct {
 	ctx    context.Context
@@ -42,16 +57,23 @@ func (hrr *HTTPRouterRunner) RunAsync() {
 
 	publisher := MustNewPublisher(hrr.rdb, hrr.logger)
 
-	e.POST("/tickets-confirmation", func(c echo.Context) error {
-		var request TicketsConfirmationRequest
+	e.POST("tickets-status", func(c echo.Context) error {
+		var request TicketsStatusRequest
 		err := c.Bind(&request)
 		if err != nil {
 			return err
 		}
 
 		for _, ticket := range request.Tickets {
-			publisher.Publish(issueReceiptTopic, message.NewMessage(watermill.NewUUID(), []byte(ticket)))
-			publisher.Publish(appendToTrackerTopic, message.NewMessage(watermill.NewUUID(), []byte(ticket)))
+			switch ticket.Status {
+			case "confirmed":
+				publisher.PublishTicketBookingConfirmedEvent(ticket)
+			case "canceled":
+				publisher.PublishTicketBookingCanceledEvent(ticket)
+			default:
+				c.String(http.StatusBadRequest, "Bad ticket status")
+			}
+
 		}
 
 		return c.NoContent(http.StatusOK)

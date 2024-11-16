@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 
+	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/redis/go-redis/v9"
@@ -43,24 +45,73 @@ func (arr *AsyncRouterRunner) RunAsync() {
 		panic(err)
 	}
 
-	issueReceiptSubscriber := MustNewIssueReceiptConsumerGroupSubscriber(arr.rdb, arr.logger)
-	appendToTrackerSubscriber := MustNewAppendToTrackerConsumerGroupSubscriber(arr.rdb, arr.logger)
+	issueReceiptSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "issue-receipt")
+	appendToTrackerSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "append-to-tracker")
+	ticketsToRefundSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "tickets-to-refund")
 
 	arr.router.AddNoPublisherHandler(
 		"issueReceiptHandler",
-		issueReceiptTopic,
+		TicketBookingConfirmedTopic,
 		issueReceiptSubscriber,
 		func(msg *message.Message) error {
-			return arr.clients.Receipts.IssueReceipt(msg.Context(), string(msg.Payload))
+			var payload TicketBookingConfirmedEvent
+			err := json.Unmarshal(msg.Payload, &payload)
+			if err != nil {
+				return err
+			}
+			return arr.clients.Receipts.IssueReceipt(msg.Context(), receipts.PutReceiptsJSONRequestBody{
+				TicketId: payload.TicketID,
+				Price: receipts.Money{
+					MoneyAmount:   payload.Price.Amount,
+					MoneyCurrency: payload.Price.Currency,
+				},
+			})
 		},
 	)
 
 	arr.router.AddNoPublisherHandler(
-		"appendToTrackerHandler",
-		appendToTrackerTopic,
+		"PrintTicketHandler",
+		TicketBookingConfirmedTopic,
 		appendToTrackerSubscriber,
 		func(msg *message.Message) error {
-			return arr.clients.Spreadsheets.AppendRow(msg.Context(), "tickets-to-print", []string{string(msg.Payload)})
+			var payload TicketBookingConfirmedEvent
+			err := json.Unmarshal(msg.Payload, &payload)
+			if err != nil {
+				return err
+			}
+
+			return arr.clients.Spreadsheets.AppendRow(
+				msg.Context(),
+				"tickets-to-print",
+				[]string{
+					payload.TicketID,
+					payload.CustomerEmail,
+					payload.Price.Amount,
+					payload.Price.Currency,
+				})
+		},
+	)
+
+	arr.router.AddNoPublisherHandler(
+		"RefundTicketHandler",
+		TicketBookingCanceledTopic,
+		ticketsToRefundSubscriber,
+		func(msg *message.Message) error {
+			var payload TicketBookingConfirmedEvent
+			err := json.Unmarshal(msg.Payload, &payload)
+			if err != nil {
+				return err
+			}
+
+			return arr.clients.Spreadsheets.AppendRow(
+				msg.Context(),
+				"tickets-to-refund",
+				[]string{
+					payload.TicketID,
+					payload.CustomerEmail,
+					payload.Price.Amount,
+					payload.Price.Currency,
+				})
 		},
 	)
 

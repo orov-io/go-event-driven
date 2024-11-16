@@ -38,11 +38,7 @@ func NewReceiptsClient(clients *clients.Clients) ReceiptsClient {
 	}
 }
 
-func (c ReceiptsClient) IssueReceipt(ctx context.Context, ticketID string) error {
-	body := receipts.PutReceiptsJSONRequestBody{
-		TicketId: ticketID,
-	}
-
+func (c ReceiptsClient) IssueReceipt(ctx context.Context, body receipts.PutReceiptsJSONRequestBody) error {
 	receiptsResp, err := c.clients.Receipts.PutReceiptsWithResponse(ctx, body)
 	if err != nil {
 		return err
