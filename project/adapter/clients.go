@@ -1,4 +1,4 @@
-package main
+package adapter
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/spreadsheets"
+	"github.com/ThreeDotsLabs/go-event-driven/common/log"
 )
 
 type Clients struct {
@@ -17,7 +18,13 @@ type Clients struct {
 }
 
 func NewClients() Clients {
-	clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
+	clients, err := clients.NewClients(
+		os.Getenv("GATEWAY_ADDR"),
+		func(ctx context.Context, req *http.Request) error {
+			req.Header.Set("Correlation-ID", log.CorrelationIDFromContext(ctx))
+			return nil
+		},
+	)
 	if err != nil {
 		panic(err)
 	}

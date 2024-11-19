@@ -4,6 +4,9 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"tickets/adapter"
+	"tickets/port/http"
+	"tickets/port/message"
 
 	"github.com/ThreeDotsLabs/go-event-driven/common/log"
 	"github.com/redis/go-redis/v9"
@@ -12,6 +15,8 @@ import (
 )
 
 func main() {
+
+	// TODO: Use wire to initialize all this: https://github.com/google/wire/blob/main/_tutorial/README.md
 	logger := log.NewWatermill(logrus.NewEntry(logrus.StandardLogger()))
 
 	rdb := redis.NewClient(&redis.Options{
@@ -24,11 +29,11 @@ func main() {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	asyncRunner := NewAsyncRouterRunner(NewAsyncRouterRunnerInfo{
+	asyncRunner := message.NewAsyncRouterRunner(message.NewAsyncRouterRunnerInfo{
 		Ctx:     ctx,
 		RDB:     rdb,
 		Logger:  logger,
-		Clients: NewClients(),
+		Clients: adapter.NewClients(),
 		G:       g,
 	})
 
@@ -36,7 +41,7 @@ func main() {
 
 	<-asyncRunner.Router().Running()
 
-	NewHTTPRouterRunner(NewAsyncRouterRunnerInfo{
+	http.NewHTTPRouterRunner(http.NewHTTPRouterRunnerInfo{
 		Ctx:    ctx,
 		RDB:    rdb,
 		Logger: logger,

@@ -1,12 +1,18 @@
-package main
+package message
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"tickets/adapter"
+	"tickets/middleware/asyncMiddleware"
+	"tickets/port"
+	"time"
 
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )
@@ -15,7 +21,7 @@ type AsyncRouterRunner struct {
 	ctx     context.Context
 	rdb     *redis.Client
 	logger  watermill.LoggerAdapter
-	clients Clients
+	clients adapter.Clients
 	g       *errgroup.Group
 	router  *message.Router
 }
@@ -24,7 +30,7 @@ type NewAsyncRouterRunnerInfo struct {
 	Ctx     context.Context
 	RDB     *redis.Client
 	Logger  watermill.LoggerAdapter
-	Clients Clients
+	Clients adapter.Clients
 	G       *errgroup.Group
 }
 
@@ -45,16 +51,33 @@ func (arr *AsyncRouterRunner) RunAsync() {
 		panic(err)
 	}
 
+	arr.router.AddMiddleware(middleware.Retry{
+		MaxRetries:      10,
+		InitialInterval: time.Millisecond * 100,
+		MaxInterval:     time.Second,
+		Multiplier:      2,
+		Logger:          arr.logger,
+	}.Middleware)
+
+	arr.router.AddMiddleware(asyncMiddleware.CorrelationID)
+	arr.router.AddMiddleware(asyncMiddleware.Logger2Context)
+	arr.router.AddMiddleware(asyncMiddleware.MessageLogger)
+	arr.router.AddMiddleware(asyncMiddleware.TypeAssertion)
+
 	issueReceiptSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "issue-receipt")
 	appendToTrackerSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "append-to-tracker")
 	ticketsToRefundSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "tickets-to-refund")
 
 	arr.router.AddNoPublisherHandler(
 		"issueReceiptHandler",
-		TicketBookingConfirmedTopic,
+		port.TicketBookingConfirmedTopic,
 		issueReceiptSubscriber,
 		func(msg *message.Message) error {
-			var payload TicketBookingConfirmedEvent
+			if msg.UUID == "2beaf5bc-d5e4-4653-b075-2b36bbf28949" {
+				return nil
+			}
+
+			var payload adapter.TicketBookingConfirmedEvent
 			err := json.Unmarshal(msg.Payload, &payload)
 			if err != nil {
 				return err
@@ -63,7 +86,7 @@ func (arr *AsyncRouterRunner) RunAsync() {
 				TicketId: payload.TicketID,
 				Price: receipts.Money{
 					MoneyAmount:   payload.Price.Amount,
-					MoneyCurrency: payload.Price.Currency,
+					MoneyCurrency: cmp.Or(payload.Price.Currency, "USD"),
 				},
 			})
 		},
@@ -71,10 +94,14 @@ func (arr *AsyncRouterRunner) RunAsync() {
 
 	arr.router.AddNoPublisherHandler(
 		"PrintTicketHandler",
-		TicketBookingConfirmedTopic,
+		port.TicketBookingConfirmedTopic,
 		appendToTrackerSubscriber,
 		func(msg *message.Message) error {
-			var payload TicketBookingConfirmedEvent
+			if msg.UUID == "2beaf5bc-d5e4-4653-b075-2b36bbf28949" {
+				return nil
+			}
+
+			var payload adapter.TicketBookingConfirmedEvent
 			err := json.Unmarshal(msg.Payload, &payload)
 			if err != nil {
 				return err
@@ -87,17 +114,17 @@ func (arr *AsyncRouterRunner) RunAsync() {
 					payload.TicketID,
 					payload.CustomerEmail,
 					payload.Price.Amount,
-					payload.Price.Currency,
+					cmp.Or(payload.Price.Currency, "USD"),
 				})
 		},
 	)
 
 	arr.router.AddNoPublisherHandler(
 		"RefundTicketHandler",
-		TicketBookingCanceledTopic,
+		port.TicketBookingCanceledTopic,
 		ticketsToRefundSubscriber,
 		func(msg *message.Message) error {
-			var payload TicketBookingConfirmedEvent
+			var payload adapter.TicketBookingConfirmedEvent
 			err := json.Unmarshal(msg.Payload, &payload)
 			if err != nil {
 				return err
@@ -110,7 +137,7 @@ func (arr *AsyncRouterRunner) RunAsync() {
 					payload.TicketID,
 					payload.CustomerEmail,
 					payload.Price.Amount,
-					payload.Price.Currency,
+					cmp.Or(payload.Price.Currency, "USD"),
 				})
 		},
 	)

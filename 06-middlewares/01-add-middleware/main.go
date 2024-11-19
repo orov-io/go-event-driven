@@ -16,6 +16,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -81,6 +82,9 @@ func main() {
 	players := map[string]Player{}
 	teams := map[string]Team{}
 
+	router.AddMiddleware(CorrelationID)
+	router.AddMiddleware(Logger)
+
 	router.AddHandler(
 		"OnPlayerJoined",
 		"player_joined",
@@ -143,8 +147,8 @@ func main() {
 				return err
 			}
 
-			// TODO
-			correlationID := ""
+			// TODO - DONE
+			correlationID := MessageCorrelationID(msg)
 
 			err = client.CreateTeamScoreboard(event.ID, correlationID)
 			if err != nil {
@@ -169,6 +173,9 @@ func main() {
 	<-router.Running()
 
 	e := echo.New()
+	e.Use(middleware.RequestIDWithConfig(middleware.RequestIDConfig{
+		TargetHeader: CorrelationIDMetadataKey,
+	}))
 	e.GET("/health", func(c echo.Context) error {
 		return c.String(200, "ok")
 	})
@@ -198,11 +205,11 @@ func main() {
 			return err
 		}
 
-		// TODO
-		correlationID := c.Request().Header.Get("Correlation-ID")
-		_ = correlationID
+		// TODO -DONE
+		correlationID := c.Request().Header.Get(CorrelationIDMetadataKey)
 
 		msg := message.NewMessage(uuid.NewString(), payload)
+		SetCorrelationID(correlationID, msg)
 
 		err = pub.Publish("player_joined", msg)
 		if err != nil {
