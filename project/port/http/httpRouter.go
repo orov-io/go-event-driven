@@ -2,15 +2,17 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"tickets/adapter"
+	"tickets/decorator"
 	"tickets/domain/ticket"
 	"tickets/middleware/httpMiddleware"
-	"tickets/port"
 
 	commonHTTP "github.com/ThreeDotsLabs/go-event-driven/common/http"
 	"github.com/ThreeDotsLabs/go-event-driven/common/log"
 	"github.com/ThreeDotsLabs/watermill"
+	"github.com/ThreeDotsLabs/watermill-redisstream/pkg/redisstream"
 	"github.com/labstack/echo/v4"
 	"github.com/lithammer/shortuuid/v3"
 	"github.com/redis/go-redis/v9"
@@ -58,12 +60,17 @@ func (hrr *HTTPRouterRunner) RunAsync() {
 		},
 	}))
 
-	publisher := adapter.MustNewPublisher(adapter.NewPublisherInfo{
-		RDB:                         hrr.rdb,
-		Logger:                      hrr.logger,
-		TicketBookingConfirmedTopic: port.TicketBookingConfirmedTopic,
-		TicketBookingCanceledTopic:  port.TicketBookingCanceledTopic,
-	})
+	publisher, err := redisstream.NewPublisher(redisstream.PublisherConfig{
+		Client: hrr.rdb,
+	}, hrr.logger)
+	if err != nil {
+		panic(fmt.Errorf("unable to create publisher: %w", err))
+	}
+
+	eventBus, err := adapter.NewEventBus(decorator.DecorateWithCorrelationPublisherDecorator(publisher))
+	if err != nil {
+		panic(fmt.Errorf("unable to create event bus: %w", err))
+	}
 
 	e.POST("tickets-status", func(c echo.Context) error {
 		var request TicketsStatusRequest
@@ -75,9 +82,23 @@ func (hrr *HTTPRouterRunner) RunAsync() {
 		for _, ticket := range request.Tickets {
 			switch ticket.Status {
 			case "confirmed":
-				publisher.PublishTicketBookingConfirmedEvent(c.Request().Context(), ticket)
+				eventBus.Publish(c.Request().Context(), adapter.TicketBookingConfirmed{
+					TicketID:      ticket.ID,
+					CustomerEmail: ticket.CustomerEmail,
+					Price: adapter.MoneyPayload{
+						Amount:   ticket.Price.Amount,
+						Currency: ticket.Price.Currency,
+					},
+				})
 			case "canceled":
-				publisher.PublishTicketBookingCanceledEvent(c.Request().Context(), ticket)
+				eventBus.Publish(c.Request().Context(), adapter.TicketBookingCanceled{
+					TicketID:      ticket.ID,
+					CustomerEmail: ticket.CustomerEmail,
+					Price: adapter.MoneyPayload{
+						Amount:   ticket.Price.Amount,
+						Currency: ticket.Price.Currency,
+					},
+				})
 			default:
 				c.String(http.StatusBadRequest, "Bad ticket status")
 			}

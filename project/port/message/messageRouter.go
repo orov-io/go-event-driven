@@ -1,32 +1,30 @@
 package message
 
 import (
-	"cmp"
 	"context"
-	"encoding/json"
 	"tickets/adapter"
 	"tickets/middleware/asyncMiddleware"
-	"tickets/port"
 	"time"
 
-	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
 	"github.com/ThreeDotsLabs/watermill"
+	"github.com/ThreeDotsLabs/watermill/components/cqrs"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )
 
-type AsyncRouterRunner struct {
-	ctx     context.Context
-	rdb     *redis.Client
-	logger  watermill.LoggerAdapter
-	clients adapter.Clients
-	g       *errgroup.Group
-	router  *message.Router
+type MessageRouterRunner struct {
+	ctx       context.Context
+	rdb       *redis.Client
+	logger    watermill.LoggerAdapter
+	clients   adapter.Clients
+	g         *errgroup.Group
+	router    *message.Router
+	processor *cqrs.EventProcessor
 }
 
-type NewAsyncRouterRunnerInfo struct {
+type NewMessageRouterRunnerInfo struct {
 	Ctx     context.Context
 	RDB     *redis.Client
 	Logger  watermill.LoggerAdapter
@@ -34,8 +32,8 @@ type NewAsyncRouterRunnerInfo struct {
 	G       *errgroup.Group
 }
 
-func NewAsyncRouterRunner(info NewAsyncRouterRunnerInfo) *AsyncRouterRunner {
-	return &AsyncRouterRunner{
+func NewMessageRouterRunner(info NewMessageRouterRunnerInfo) *MessageRouterRunner {
+	return &MessageRouterRunner{
 		ctx:     info.Ctx,
 		rdb:     info.RDB,
 		logger:  info.Logger,
@@ -44,31 +42,39 @@ func NewAsyncRouterRunner(info NewAsyncRouterRunnerInfo) *AsyncRouterRunner {
 	}
 }
 
-func (arr *AsyncRouterRunner) RunAsync() {
+func (mrr *MessageRouterRunner) RunAsync() {
 	var err error
-	arr.router, err = message.NewRouter(message.RouterConfig{}, arr.logger)
+	mrr.router, err = message.NewRouter(message.RouterConfig{}, mrr.logger)
 	if err != nil {
 		panic(err)
 	}
 
-	arr.router.AddMiddleware(middleware.Retry{
+	mrr.router.AddMiddleware(middleware.Retry{
 		MaxRetries:      10,
 		InitialInterval: time.Millisecond * 100,
 		MaxInterval:     time.Second,
 		Multiplier:      2,
-		Logger:          arr.logger,
+		Logger:          mrr.logger,
 	}.Middleware)
 
-	arr.router.AddMiddleware(asyncMiddleware.CorrelationID)
-	arr.router.AddMiddleware(asyncMiddleware.Logger2Context)
-	arr.router.AddMiddleware(asyncMiddleware.MessageLogger)
-	arr.router.AddMiddleware(asyncMiddleware.TypeAssertion)
+	mrr.router.AddMiddleware(asyncMiddleware.CorrelationID)
+	mrr.router.AddMiddleware(asyncMiddleware.Logger2Context)
+	mrr.router.AddMiddleware(asyncMiddleware.MessageLogger)
+	mrr.router.AddMiddleware(asyncMiddleware.TypeAssertion)
 
-	issueReceiptSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "issue-receipt")
-	appendToTrackerSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "append-to-tracker")
-	ticketsToRefundSubscriber := MustNewConsumerGroupSubscriber(arr.rdb, arr.logger, "tickets-to-refund")
+	mrr.processor = mustNewEventProcessor(
+		mrr.router,
+		mrr.rdb,
+		mrr.logger,
+	)
 
-	arr.router.AddNoPublisherHandler(
+	mrr.processor.AddHandlers(
+		mrr.issueReceiptHandler(),
+		mrr.printTicketHandler(),
+		mrr.refundTicketHandler(),
+	)
+
+	/* mrr.router.AddNoPublisherHandler(
 		"issueReceiptHandler",
 		port.TicketBookingConfirmedTopic,
 		issueReceiptSubscriber,
@@ -82,17 +88,18 @@ func (arr *AsyncRouterRunner) RunAsync() {
 			if err != nil {
 				return err
 			}
-			return arr.clients.Receipts.IssueReceipt(msg.Context(), receipts.PutReceiptsJSONRequestBody{
-				TicketId: payload.TicketID,
-				Price: receipts.Money{
-					MoneyAmount:   payload.Price.Amount,
-					MoneyCurrency: cmp.Or(payload.Price.Currency, "USD"),
+			_, err = mrr.clients.Receipts.IssueReceipt(msg.Context(), adapter.IssueReceiptRequest{
+				TicketID: payload.TicketID,
+				Price: adapter.Money{
+					Amount:   payload.Price.Amount,
+					Currency: payload.Price.Currency,
 				},
 			})
+			return err
 		},
 	)
 
-	arr.router.AddNoPublisherHandler(
+	mrr.router.AddNoPublisherHandler(
 		"PrintTicketHandler",
 		port.TicketBookingConfirmedTopic,
 		appendToTrackerSubscriber,
@@ -107,7 +114,7 @@ func (arr *AsyncRouterRunner) RunAsync() {
 				return err
 			}
 
-			return arr.clients.Spreadsheets.AppendRow(
+			return mrr.clients.Spreadsheets.AppendRow(
 				msg.Context(),
 				"tickets-to-print",
 				[]string{
@@ -119,7 +126,7 @@ func (arr *AsyncRouterRunner) RunAsync() {
 		},
 	)
 
-	arr.router.AddNoPublisherHandler(
+	mrr.router.AddNoPublisherHandler(
 		"RefundTicketHandler",
 		port.TicketBookingCanceledTopic,
 		ticketsToRefundSubscriber,
@@ -130,7 +137,7 @@ func (arr *AsyncRouterRunner) RunAsync() {
 				return err
 			}
 
-			return arr.clients.Spreadsheets.AppendRow(
+			return mrr.clients.Spreadsheets.AppendRow(
 				msg.Context(),
 				"tickets-to-refund",
 				[]string{
@@ -140,10 +147,10 @@ func (arr *AsyncRouterRunner) RunAsync() {
 					cmp.Or(payload.Price.Currency, "USD"),
 				})
 		},
-	)
+	) */
 
-	arr.g.Go(func() error {
-		err := arr.router.Run(context.Background())
+	mrr.g.Go(func() error {
+		err := mrr.router.Run(context.Background())
 		if err != nil {
 			return err
 		}
@@ -152,6 +159,6 @@ func (arr *AsyncRouterRunner) RunAsync() {
 	})
 }
 
-func (arr *AsyncRouterRunner) Router() *message.Router {
-	return arr.router
+func (mrr *MessageRouterRunner) Router() *message.Router {
+	return mrr.router
 }
